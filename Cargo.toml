@@ -1,0 +1,13 @@
+[package]
+name = "vmem"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "*"
+spin = "*"
+log = "*"
+
+[dev-dependencies]
+libc = "*"
+pretty_env_logger = "*"
