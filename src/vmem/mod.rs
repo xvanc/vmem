@@ -80,8 +80,16 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::must_use_candidate)]
 
+#[cfg(xvt)]
+use crate::mutex::SpinMutex;
 use alloc::borrow::Cow;
-use core::{cmp, mem::MaybeUninit, ptr};
+use core::{
+    cmp, ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
+#[cfg(xvt)]
+type Mutex<T> = SpinMutex<T>;
+#[cfg(not(xvt))]
 use spin::Mutex;
 
 mod allocation_table;
@@ -105,11 +113,13 @@ fn freelist_for_size(size: usize) -> usize {
 /// # Safety
 ///
 /// This function must only be called once.
+#[allow(clippy::needless_range_loop)]
 pub unsafe fn bootstrap() {
     // Init the list of static boundary tags.
-    let StaticBts { storage, head } = &mut *STATIC_BOUNDARY_TAGS.lock();
-    for bt in storage.iter_mut().map(MaybeUninit::as_mut_ptr) {
-        head.insert_head(bt);
+    for i in 0..NUM_STATIC_BTS {
+        let bt = ptr::addr_of_mut!(STATIC_BOUNDARY_TAG_STORAGE[i]);
+        (*bt).segment_queue_link.next = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
+        STATIC_BOUNDARY_TAGS.store(bt, Ordering::Relaxed);
     }
 }
 
@@ -246,38 +256,45 @@ impl Bt {
     }
 }
 
-struct StaticBts {
-    storage: [MaybeUninit<Bt>; NUM_STATIC_BTS],
-    head: SegmentQueue,
-}
-
-unsafe impl Send for StaticBts {}
-unsafe impl Sync for StaticBts {}
-
-static STATIC_BOUNDARY_TAGS: Mutex<StaticBts> = {
-    const UNINIT: MaybeUninit<Bt> = MaybeUninit::new(Bt::new(0, 0, BtKind::Span));
-    Mutex::new(StaticBts {
-        storage: [UNINIT; NUM_STATIC_BTS],
-        head: SegmentQueue::new(),
-    })
+static mut STATIC_BOUNDARY_TAG_STORAGE: [Bt; NUM_STATIC_BTS] = {
+    const UNINIT: Bt = Bt::new(0, 0, BtKind::Span);
+    [UNINIT; NUM_STATIC_BTS]
 };
 
+static STATIC_BOUNDARY_TAGS: AtomicPtr<Bt> = AtomicPtr::new(ptr::null_mut());
+
 fn alloc_static_bt() -> Option<*mut Bt> {
-    STATIC_BOUNDARY_TAGS.lock().head.pop_head()
+    let mut bt;
+    loop {
+        bt = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
+        if bt.is_null() {
+            break None;
+        }
+        let new_head = unsafe { (*bt).segment_queue_link.next };
+        if STATIC_BOUNDARY_TAGS
+            .compare_exchange_weak(bt, new_head, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            break Some(bt);
+        }
+        core::hint::spin_loop();
+    }
 }
 
 unsafe fn free_static_bt(bt: *mut Bt) {
     debug_assert!(!bt.is_null());
-    let mut static_bts = STATIC_BOUNDARY_TAGS.lock();
-    debug_assert!(
+
+    loop {
+        let old_head = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
+        (*bt).segment_queue_link.next = old_head;
+        if STATIC_BOUNDARY_TAGS
+            .compare_exchange_weak(old_head, bt, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
         {
-            let start = static_bts.storage.as_ptr();
-            let end = start.add(NUM_STATIC_BTS);
-            (start as usize..end as usize).contains(&(bt as usize))
-        },
-        "free_static_bt() called with non-static bt"
-    );
-    static_bts.head.insert_head(bt);
+            break;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 #[derive(Debug)]
@@ -382,6 +399,7 @@ impl Layout {
 
 /// Allocation Strategy
 #[repr(u32)]
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
 pub enum AllocStrategy {
     /// Best Fit
@@ -524,7 +542,7 @@ impl Vmem<'_, '_> {
 
             // If we have a source, import from it.
             if let Some(source) = self.source {
-                let size = self.quantum * 64; // ?????
+                let size = 0x1000 * 64; // ?????
                 if let Ok(base) = source.import(size) {
                     self.add_inner(&mut l, base, size, BtKind::SpanImported)?;
                     continue;
@@ -646,7 +664,7 @@ impl Vmem<'_, '_> {
                 l.allocation_table.remove(bt);
                 // (*bt).kind = BtKind::Free;
 
-                let (prev, next) = l.merge(&mut *bt);
+                let (prev, next) = l.merge(bt);
 
                 // Check if the entire span is now free.
                 if (*prev).is_span() && (next.is_null() || (*next).is_span()) {
@@ -698,21 +716,18 @@ struct VmemInner {
 }
 
 impl VmemInner {
-    #[allow(clippy::too_many_arguments)]
     fn choose_instant_fit(&mut self, layout: &Layout) -> Option<(*mut Bt, usize)> {
         let first = freelist_for_size(layout.size) + usize::from(!layout.size.is_power_of_two());
         for list in self.freelist.lists[first..].iter_mut() {
-            if let Some(bt) = list.head_as_mut() {
-                // if let Some(offset) = bt.can_satisfy(size, align, phase, nocross, minaddr, maxaddr)
-                if let Some(offset) = bt.can_satisfy(layout) {
-                    return Some((bt, offset));
+            if !list.head.is_null() {
+                if let Some(offset) = unsafe { (*list.head).can_satisfy(layout) } {
+                    return Some((list.head, offset));
                 }
             }
         }
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn choose_best_fit(&mut self, layout: &Layout) -> Option<(*mut Bt, usize)> {
         let first = freelist_for_size(layout.size);
         for list in self.freelist.lists[first..].iter_mut() {
@@ -775,16 +790,18 @@ impl VmemInner {
     /// Attempt to merge neighbors into `bt`.
     ///
     /// Returns the new `prev` and `next` pointers, which will have already been updated in `bt`.
-    unsafe fn merge(&mut self, bt: &mut Bt) -> (*mut Bt, *mut Bt) {
-        let mut prev = bt.segment_list_link.prev;
-        let mut next = bt.segment_list_link.next;
+    unsafe fn merge(&mut self, bt: *mut Bt) -> (*mut Bt, *mut Bt) {
+        debug_assert!(!bt.is_null());
+        debug_assert!(!matches!((*bt).kind, BtKind::Span | BtKind::SpanImported));
 
-        debug_assert!(bt.kind != BtKind::Span);
+        let mut prev = (*bt).segment_list_link.prev;
+        let mut next = (*bt).segment_list_link.next;
+
         debug_assert!(!prev.is_null());
 
-        if (*prev).kind == BtKind::Free && (*prev).base + (*prev).size == bt.base {
-            bt.base = (*prev).base;
-            bt.size += (*prev).size;
+        if (*prev).kind == BtKind::Free && (*prev).base + (*prev).size == (*bt).base {
+            (*bt).base = (*prev).base;
+            (*bt).size += (*prev).size;
             let old = prev;
             prev = (*prev).segment_list_link.prev;
             self.freelist.remove(old);
@@ -792,8 +809,11 @@ impl VmemInner {
             Bt::free(old);
         }
 
-        if !next.is_null() && (*next).kind == BtKind::Free && bt.base + bt.size == (*next).base {
-            bt.size += (*next).size;
+        if !next.is_null()
+            && (*next).kind == BtKind::Free
+            && (*bt).base + (*bt).size == (*next).base
+        {
+            (*bt).size += (*next).size;
             let old = next;
             next = (*next).segment_list_link.next;
             self.freelist.remove(old);

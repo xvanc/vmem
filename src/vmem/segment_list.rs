@@ -79,18 +79,15 @@ impl SegmentList {
     }
 
     pub(super) unsafe fn insert_ordered_span(&mut self, span: *mut Bt, free: *mut Bt) {
-        let span = &mut *span;
-        let free = &mut *free;
+        debug_assert!((*span).base == (*free).base);
+        debug_assert!((*span).size == (*free).size);
 
-        debug_assert!(span.base == free.base);
-        debug_assert!(span.size == free.size);
+        let (prev, next) = self.insertion_point((*span).base);
 
-        let (prev, next) = self.insertion_point(span.base);
-
-        span.segment_list_link.prev = prev;
-        span.segment_list_link.next = free;
-        free.segment_list_link.prev = span;
-        free.segment_list_link.next = next;
+        (*span).segment_list_link.prev = prev;
+        (*span).segment_list_link.next = free;
+        (*free).segment_list_link.prev = span;
+        (*free).segment_list_link.next = next;
 
         if prev.is_null() {
             self.head = span;
@@ -138,10 +135,6 @@ impl SegmentQueue {
             head: ptr::null_mut(),
             tail: ptr::null_mut(),
         }
-    }
-
-    pub(super) fn head_as_mut<'a>(&mut self) -> Option<&'a mut Bt> {
-        unsafe { self.head.as_mut() }
     }
 
     pub(super) unsafe fn insert_head(&mut self, bt: *mut Bt) {
