@@ -815,6 +815,26 @@
 <span id="815">815</span>
 <span id="816">816</span>
 <span id="817">817</span>
+<span id="818">818</span>
+<span id="819">819</span>
+<span id="820">820</span>
+<span id="821">821</span>
+<span id="822">822</span>
+<span id="823">823</span>
+<span id="824">824</span>
+<span id="825">825</span>
+<span id="826">826</span>
+<span id="827">827</span>
+<span id="828">828</span>
+<span id="829">829</span>
+<span id="830">830</span>
+<span id="831">831</span>
+<span id="832">832</span>
+<span id="833">833</span>
+<span id="834">834</span>
+<span id="835">835</span>
+<span id="836">836</span>
+<span id="837">837</span>
 </pre><pre class="rust"><code><span class="comment">/*
  * Copyright (c) 2022 xvanc &lt;xvancm@gmail.com&gt;
  *
@@ -897,9 +917,17 @@
 </span><span class="attribute">#![warn(clippy::pedantic)]
 #![allow(clippy::must_use_candidate)]
 
-</span><span class="kw">use </span>alloc::borrow::Cow;
-<span class="kw">use </span>core::{cmp, mem::MaybeUninit, ptr};
-<span class="kw">use </span>spin::Mutex;
+#[cfg(xvt)]
+</span><span class="kw">use </span><span class="kw">crate</span>::mutex::SpinMutex;
+<span class="kw">use </span>alloc::borrow::Cow;
+<span class="kw">use </span>core::{
+    cmp, ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
+<span class="attribute">#[cfg(xvt)]
+</span><span class="kw">type </span>Mutex&lt;T&gt; = SpinMutex&lt;T&gt;;
+<span class="attribute">#[cfg(not(xvt))]
+</span><span class="kw">use </span>spin::Mutex;
 
 <span class="kw">mod </span>allocation_table;
 <span class="kw">mod </span>segment_list;
@@ -922,11 +950,13 @@
 /// # Safety
 ///
 /// This function must only be called once.
+</span><span class="attribute">#[allow(clippy::needless_range_loop)]
 </span><span class="kw">pub unsafe fn </span>bootstrap() {
     <span class="comment">// Init the list of static boundary tags.
-    </span><span class="kw">let </span>StaticBts { storage, head } = <span class="kw-2">&amp;mut *</span>STATIC_BOUNDARY_TAGS.lock();
-    <span class="kw">for </span>bt <span class="kw">in </span>storage.iter_mut().map(MaybeUninit::as_mut_ptr) {
-        head.insert_head(bt);
+    </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..NUM_STATIC_BTS {
+        <span class="kw">let </span>bt = <span class="macro">ptr::addr_of_mut!</span>(STATIC_BOUNDARY_TAG_STORAGE[i]);
+        (<span class="kw-2">*</span>bt).segment_queue_link.next = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
+        STATIC_BOUNDARY_TAGS.store(bt, Ordering::Relaxed);
     }
 }
 
@@ -1063,38 +1093,45 @@
     }
 }
 
-<span class="kw">struct </span>StaticBts {
-    storage: [MaybeUninit&lt;Bt&gt;; NUM_STATIC_BTS],
-    head: SegmentQueue,
-}
-
-<span class="kw">unsafe impl </span>Send <span class="kw">for </span>StaticBts {}
-<span class="kw">unsafe impl </span>Sync <span class="kw">for </span>StaticBts {}
-
-<span class="kw">static </span>STATIC_BOUNDARY_TAGS: Mutex&lt;StaticBts&gt; = {
-    <span class="kw">const </span>UNINIT: MaybeUninit&lt;Bt&gt; = MaybeUninit::new(Bt::new(<span class="number">0</span>, <span class="number">0</span>, BtKind::Span));
-    Mutex::new(StaticBts {
-        storage: [UNINIT; NUM_STATIC_BTS],
-        head: SegmentQueue::new(),
-    })
+<span class="kw">static </span><span class="kw-2">mut </span>STATIC_BOUNDARY_TAG_STORAGE: [Bt; NUM_STATIC_BTS] = {
+    <span class="kw">const </span>UNINIT: Bt = Bt::new(<span class="number">0</span>, <span class="number">0</span>, BtKind::Span);
+    [UNINIT; NUM_STATIC_BTS]
 };
 
+<span class="kw">static </span>STATIC_BOUNDARY_TAGS: AtomicPtr&lt;Bt&gt; = AtomicPtr::new(ptr::null_mut());
+
 <span class="kw">fn </span>alloc_static_bt() -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">*mut </span>Bt&gt; {
-    STATIC_BOUNDARY_TAGS.lock().head.pop_head()
+    <span class="kw">let </span><span class="kw-2">mut </span>bt;
+    <span class="kw">loop </span>{
+        bt = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
+        <span class="kw">if </span>bt.is_null() {
+            <span class="kw">break </span><span class="prelude-val">None</span>;
+        }
+        <span class="kw">let </span>new_head = <span class="kw">unsafe </span>{ (<span class="kw-2">*</span>bt).segment_queue_link.next };
+        <span class="kw">if </span>STATIC_BOUNDARY_TAGS
+            .compare_exchange_weak(bt, new_head, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            <span class="kw">break </span><span class="prelude-val">Some</span>(bt);
+        }
+        core::hint::spin_loop();
+    }
 }
 
 <span class="kw">unsafe fn </span>free_static_bt(bt: <span class="kw-2">*mut </span>Bt) {
     <span class="macro">debug_assert!</span>(!bt.is_null());
-    <span class="kw">let </span><span class="kw-2">mut </span>static_bts = STATIC_BOUNDARY_TAGS.lock();
-    <span class="macro">debug_assert!</span>(
+
+    <span class="kw">loop </span>{
+        <span class="kw">let </span>old_head = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
+        (<span class="kw-2">*</span>bt).segment_queue_link.next = old_head;
+        <span class="kw">if </span>STATIC_BOUNDARY_TAGS
+            .compare_exchange_weak(old_head, bt, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
         {
-            <span class="kw">let </span>start = static_bts.storage.as_ptr();
-            <span class="kw">let </span>end = start.add(NUM_STATIC_BTS);
-            (start <span class="kw">as </span>usize..end <span class="kw">as </span>usize).contains(<span class="kw-2">&amp;</span>(bt <span class="kw">as </span>usize))
-        },
-        <span class="string">&quot;free_static_bt() called with non-static bt&quot;
-    </span>);
-    static_bts.head.insert_head(bt);
+            <span class="kw">break</span>;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 <span class="attribute">#[derive(Debug)]
@@ -1199,6 +1236,7 @@
 
 <span class="doccomment">/// Allocation Strategy
 </span><span class="attribute">#[repr(u32)]
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
 </span><span class="kw">pub enum </span>AllocStrategy {
     <span class="doccomment">/// Best Fit
@@ -1341,7 +1379,7 @@
 
             <span class="comment">// If we have a source, import from it.
             </span><span class="kw">if let </span><span class="prelude-val">Some</span>(source) = <span class="self">self</span>.source {
-                <span class="kw">let </span>size = <span class="self">self</span>.quantum * <span class="number">64</span>; <span class="comment">// ?????
+                <span class="kw">let </span>size = <span class="number">0x1000 </span>* <span class="number">64</span>; <span class="comment">// ?????
                 </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(base) = source.import(size) {
                     <span class="self">self</span>.add_inner(<span class="kw-2">&amp;mut </span>l, base, size, BtKind::SpanImported)<span class="question-mark">?</span>;
                     <span class="kw">continue</span>;
@@ -1463,7 +1501,7 @@
                 l.allocation_table.remove(bt);
                 <span class="comment">// (*bt).kind = BtKind::Free;
 
-                </span><span class="kw">let </span>(prev, next) = l.merge(<span class="kw-2">&amp;mut *</span>bt);
+                </span><span class="kw">let </span>(prev, next) = l.merge(bt);
 
                 <span class="comment">// Check if the entire span is now free.
                 </span><span class="kw">if </span>(<span class="kw-2">*</span>prev).is_span() &amp;&amp; (next.is_null() || (<span class="kw-2">*</span>next).is_span()) {
@@ -1515,22 +1553,19 @@
 }
 
 <span class="kw">impl </span>VmemInner {
-    <span class="attribute">#[allow(clippy::too_many_arguments)]
-    </span><span class="kw">fn </span>choose_instant_fit(<span class="kw-2">&amp;mut </span><span class="self">self</span>, layout: <span class="kw-2">&amp;</span>Layout) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="kw-2">*mut </span>Bt, usize)&gt; {
+    <span class="kw">fn </span>choose_instant_fit(<span class="kw-2">&amp;mut </span><span class="self">self</span>, layout: <span class="kw-2">&amp;</span>Layout) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="kw-2">*mut </span>Bt, usize)&gt; {
         <span class="kw">let </span>first = freelist_for_size(layout.size) + usize::from(!layout.size.is_power_of_two());
         <span class="kw">for </span>list <span class="kw">in </span><span class="self">self</span>.freelist.lists[first..].iter_mut() {
-            <span class="kw">if let </span><span class="prelude-val">Some</span>(bt) = list.head_as_mut() {
-                <span class="comment">// if let Some(offset) = bt.can_satisfy(size, align, phase, nocross, minaddr, maxaddr)
-                </span><span class="kw">if let </span><span class="prelude-val">Some</span>(offset) = bt.can_satisfy(layout) {
-                    <span class="kw">return </span><span class="prelude-val">Some</span>((bt, offset));
+            <span class="kw">if </span>!list.head.is_null() {
+                <span class="kw">if let </span><span class="prelude-val">Some</span>(offset) = <span class="kw">unsafe </span>{ (<span class="kw-2">*</span>list.head).can_satisfy(layout) } {
+                    <span class="kw">return </span><span class="prelude-val">Some</span>((list.head, offset));
                 }
             }
         }
         <span class="prelude-val">None
     </span>}
 
-    <span class="attribute">#[allow(clippy::too_many_arguments)]
-    </span><span class="kw">fn </span>choose_best_fit(<span class="kw-2">&amp;mut </span><span class="self">self</span>, layout: <span class="kw-2">&amp;</span>Layout) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="kw-2">*mut </span>Bt, usize)&gt; {
+    <span class="kw">fn </span>choose_best_fit(<span class="kw-2">&amp;mut </span><span class="self">self</span>, layout: <span class="kw-2">&amp;</span>Layout) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="kw-2">*mut </span>Bt, usize)&gt; {
         <span class="kw">let </span>first = freelist_for_size(layout.size);
         <span class="kw">for </span>list <span class="kw">in </span><span class="self">self</span>.freelist.lists[first..].iter_mut() {
             <span class="kw">let </span><span class="kw-2">mut </span>bt = list.head;
@@ -1592,16 +1627,18 @@
     <span class="doccomment">/// Attempt to merge neighbors into `bt`.
     ///
     /// Returns the new `prev` and `next` pointers, which will have already been updated in `bt`.
-    </span><span class="kw">unsafe fn </span>merge(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bt: <span class="kw-2">&amp;mut </span>Bt) -&gt; (<span class="kw-2">*mut </span>Bt, <span class="kw-2">*mut </span>Bt) {
-        <span class="kw">let </span><span class="kw-2">mut </span>prev = bt.segment_list_link.prev;
-        <span class="kw">let </span><span class="kw-2">mut </span>next = bt.segment_list_link.next;
+    </span><span class="kw">unsafe fn </span>merge(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bt: <span class="kw-2">*mut </span>Bt) -&gt; (<span class="kw-2">*mut </span>Bt, <span class="kw-2">*mut </span>Bt) {
+        <span class="macro">debug_assert!</span>(!bt.is_null());
+        <span class="macro">debug_assert!</span>(!<span class="macro">matches!</span>((<span class="kw-2">*</span>bt).kind, BtKind::Span | BtKind::SpanImported));
 
-        <span class="macro">debug_assert!</span>(bt.kind != BtKind::Span);
+        <span class="kw">let </span><span class="kw-2">mut </span>prev = (<span class="kw-2">*</span>bt).segment_list_link.prev;
+        <span class="kw">let </span><span class="kw-2">mut </span>next = (<span class="kw-2">*</span>bt).segment_list_link.next;
+
         <span class="macro">debug_assert!</span>(!prev.is_null());
 
-        <span class="kw">if </span>(<span class="kw-2">*</span>prev).kind == BtKind::Free &amp;&amp; (<span class="kw-2">*</span>prev).base + (<span class="kw-2">*</span>prev).size == bt.base {
-            bt.base = (<span class="kw-2">*</span>prev).base;
-            bt.size += (<span class="kw-2">*</span>prev).size;
+        <span class="kw">if </span>(<span class="kw-2">*</span>prev).kind == BtKind::Free &amp;&amp; (<span class="kw-2">*</span>prev).base + (<span class="kw-2">*</span>prev).size == (<span class="kw-2">*</span>bt).base {
+            (<span class="kw-2">*</span>bt).base = (<span class="kw-2">*</span>prev).base;
+            (<span class="kw-2">*</span>bt).size += (<span class="kw-2">*</span>prev).size;
             <span class="kw">let </span>old = prev;
             prev = (<span class="kw-2">*</span>prev).segment_list_link.prev;
             <span class="self">self</span>.freelist.remove(old);
@@ -1609,8 +1646,11 @@
             Bt::free(old);
         }
 
-        <span class="kw">if </span>!next.is_null() &amp;&amp; (<span class="kw-2">*</span>next).kind == BtKind::Free &amp;&amp; bt.base + bt.size == (<span class="kw-2">*</span>next).base {
-            bt.size += (<span class="kw-2">*</span>next).size;
+        <span class="kw">if </span>!next.is_null()
+            &amp;&amp; (<span class="kw-2">*</span>next).kind == BtKind::Free
+            &amp;&amp; (<span class="kw-2">*</span>bt).base + (<span class="kw-2">*</span>bt).size == (<span class="kw-2">*</span>next).base
+        {
+            (<span class="kw-2">*</span>bt).size += (<span class="kw-2">*</span>next).size;
             <span class="kw">let </span>old = next;
             next = (<span class="kw-2">*</span>next).segment_list_link.next;
             <span class="self">self</span>.freelist.remove(old);
@@ -1633,4 +1673,4 @@
     }
 }
 </code></pre></div>
-</section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="vmem" data-themes="ayu,dark,light" data-resource-suffix="" data-rustdoc-version="1.66.0 (69f9c33d7 2022-12-12)" ></div></body></html>
+</section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="vmem" data-themes="ayu,dark,light" data-resource-suffix="" data-rustdoc-version="1.66.1 (90743e729 2023-01-10)" ></div></body></html>

@@ -175,13 +175,6 @@
 <span id="175">175</span>
 <span id="176">176</span>
 <span id="177">177</span>
-<span id="178">178</span>
-<span id="179">179</span>
-<span id="180">180</span>
-<span id="181">181</span>
-<span id="182">182</span>
-<span id="183">183</span>
-<span id="184">184</span>
 </pre><pre class="rust"><code><span class="kw">use </span><span class="kw">super</span>::Bt;
 <span class="kw">use </span>core::ptr;
 
@@ -263,18 +256,15 @@
     }
 
     <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">unsafe fn </span>insert_ordered_span(<span class="kw-2">&amp;mut </span><span class="self">self</span>, span: <span class="kw-2">*mut </span>Bt, free: <span class="kw-2">*mut </span>Bt) {
-        <span class="kw">let </span>span = <span class="kw-2">&amp;mut *</span>span;
-        <span class="kw">let </span>free = <span class="kw-2">&amp;mut *</span>free;
+        <span class="macro">debug_assert!</span>((<span class="kw-2">*</span>span).base == (<span class="kw-2">*</span>free).base);
+        <span class="macro">debug_assert!</span>((<span class="kw-2">*</span>span).size == (<span class="kw-2">*</span>free).size);
 
-        <span class="macro">debug_assert!</span>(span.base == free.base);
-        <span class="macro">debug_assert!</span>(span.size == free.size);
+        <span class="kw">let </span>(prev, next) = <span class="self">self</span>.insertion_point((<span class="kw-2">*</span>span).base);
 
-        <span class="kw">let </span>(prev, next) = <span class="self">self</span>.insertion_point(span.base);
-
-        span.segment_list_link.prev = prev;
-        span.segment_list_link.next = free;
-        free.segment_list_link.prev = span;
-        free.segment_list_link.next = next;
+        (<span class="kw-2">*</span>span).segment_list_link.prev = prev;
+        (<span class="kw-2">*</span>span).segment_list_link.next = free;
+        (<span class="kw-2">*</span>free).segment_list_link.prev = span;
+        (<span class="kw-2">*</span>free).segment_list_link.next = next;
 
         <span class="kw">if </span>prev.is_null() {
             <span class="self">self</span>.head = span;
@@ -324,10 +314,6 @@
         }
     }
 
-    <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>head_as_mut&lt;<span class="lifetime">&#39;a</span>&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">&#39;a </span><span class="kw-2">mut </span>Bt&gt; {
-        <span class="kw">unsafe </span>{ <span class="self">self</span>.head.as_mut() }
-    }
-
     <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">unsafe fn </span>insert_head(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bt: <span class="kw-2">*mut </span>Bt) {
         <span class="kw">let </span>prev = ptr::null_mut();
         <span class="kw">let </span>next = <span class="self">self</span>.head;
@@ -367,4 +353,4 @@
     }
 }
 </code></pre></div>
-</section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="vmem" data-themes="ayu,dark,light" data-resource-suffix="" data-rustdoc-version="1.66.0 (69f9c33d7 2022-12-12)" ></div></body></html>
+</section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="vmem" data-themes="ayu,dark,light" data-resource-suffix="" data-rustdoc-version="1.66.1 (90743e729 2023-01-10)" ></div></body></html>
