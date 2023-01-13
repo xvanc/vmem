@@ -425,7 +425,11 @@ pub enum AllocStrategy {
 ///
 /// # Safety
 pub unsafe trait Source: Send + Sync {
+    /// Import a span from this source.
+    ///
     /// # Errors
+    ///
+    /// Returns [`Err`] if no resources are currently available.
     fn import(&self, size: usize) -> Result<usize>;
 
     /// Release a segment back to its source
@@ -483,6 +487,7 @@ impl<'name, 'src> Vmem<'name, 'src> {
                     lists: [SegmentQueue::EMPTY; NUM_FREE_LISTS],
                 },
                 segment_list: SegmentList::new(),
+                last_alloc: ptr::null_mut(),
             }),
         }
     }
@@ -515,10 +520,6 @@ impl Vmem<'_, '_> {
     ) -> Result<usize> {
         layout.quantum_align(self.quantum);
 
-        if strategy == AllocStrategy::NextFit {
-            todo!("next fit allocation strategy");
-        }
-
         let mut l = self.l.lock();
 
         // Select a segment from which to allocate.
@@ -527,7 +528,7 @@ impl Vmem<'_, '_> {
             let opt = match strategy {
                 AllocStrategy::BestFit => l.choose_best_fit(&layout),
                 AllocStrategy::InstantFit => l.choose_instant_fit(&layout),
-                AllocStrategy::NextFit => todo!(),
+                AllocStrategy::NextFit => l.choose_next_fit(&layout),
             };
 
             if let Some(bt) = opt {
@@ -569,6 +570,7 @@ impl Vmem<'_, '_> {
 
             // Insert the segment into the allocation table.
             l.allocation_table.insert(bt);
+            l.last_alloc = bt;
 
             Ok((*bt).base)
         }
@@ -672,6 +674,15 @@ impl Vmem<'_, '_> {
                     if (*prev).kind == BtKind::SpanImported {
                         // Remove the span marker and the now free segment from the
                         // arena's segment list.
+
+                        if l.last_alloc == bt {
+                            if (*bt).segment_list_link.next.is_null() {
+                                l.last_alloc = l.segment_list.head;
+                            } else {
+                                l.last_alloc = (*bt).segment_list_link.next;
+                            }
+                        }
+
                         l.segment_list.remove(prev);
                         l.segment_list.remove(bt);
 
@@ -684,6 +695,14 @@ impl Vmem<'_, '_> {
 
                 (*bt).kind = BtKind::Free;
                 l.freelist.insert(bt);
+            }
+        }
+
+        if l.last_alloc == bt {
+            if (*bt).segment_list_link.next.is_null() {
+                l.last_alloc = l.segment_list.head;
+            } else {
+                l.last_alloc = (*bt).segment_list_link.next;
             }
         }
 
@@ -713,6 +732,7 @@ struct VmemInner {
     segment_list: SegmentList,
     allocation_table: AllocationTable,
     freelist: FreeLists,
+    last_alloc: *mut Bt,
 }
 
 impl VmemInner {
@@ -742,6 +762,42 @@ impl VmemInner {
             }
         }
         None
+    }
+
+    fn choose_next_fit(&mut self, layout: &Layout) -> Option<(*mut Bt, usize)> {
+        // Start searching from the most recent allocation.
+        let start = if self.last_alloc.is_null() {
+            self.segment_list.head
+        } else {
+            self.last_alloc
+        };
+        let mut bt = start;
+
+        if bt.is_null() {
+            // Arena is empty.
+            return None;
+        }
+
+        loop {
+            unsafe {
+                if (*bt).kind == BtKind::Free {
+                    if let Some(offset) = (*bt).can_satisfy(layout) {
+                        break Some((bt, offset));
+                    }
+                }
+
+                if (*bt).segment_list_link.next.is_null() {
+                    // Reached the end, wrap back around.
+                    bt = self.segment_list.head;
+                } else {
+                    bt = (*bt).segment_list_link.next;
+                }
+                if bt == start {
+                    // We've searched the entire arena.
+                    break None;
+                }
+            }
+        }
     }
 
     fn print_segment_list(&self) {
@@ -809,7 +865,10 @@ impl VmemInner {
             Bt::free(old);
         }
 
+        // We want to prevent merging the next block into this one if `last_alloc` still
+        // points this tag. Otherwise we'd start recycling allocations too quickly.
         if !next.is_null()
+            && self.last_alloc != bt
             && (*next).kind == BtKind::Free
             && (*bt).base + (*bt).size == (*next).base
         {
