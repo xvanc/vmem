@@ -835,6 +835,65 @@
 <span id="835">835</span>
 <span id="836">836</span>
 <span id="837">837</span>
+<span id="838">838</span>
+<span id="839">839</span>
+<span id="840">840</span>
+<span id="841">841</span>
+<span id="842">842</span>
+<span id="843">843</span>
+<span id="844">844</span>
+<span id="845">845</span>
+<span id="846">846</span>
+<span id="847">847</span>
+<span id="848">848</span>
+<span id="849">849</span>
+<span id="850">850</span>
+<span id="851">851</span>
+<span id="852">852</span>
+<span id="853">853</span>
+<span id="854">854</span>
+<span id="855">855</span>
+<span id="856">856</span>
+<span id="857">857</span>
+<span id="858">858</span>
+<span id="859">859</span>
+<span id="860">860</span>
+<span id="861">861</span>
+<span id="862">862</span>
+<span id="863">863</span>
+<span id="864">864</span>
+<span id="865">865</span>
+<span id="866">866</span>
+<span id="867">867</span>
+<span id="868">868</span>
+<span id="869">869</span>
+<span id="870">870</span>
+<span id="871">871</span>
+<span id="872">872</span>
+<span id="873">873</span>
+<span id="874">874</span>
+<span id="875">875</span>
+<span id="876">876</span>
+<span id="877">877</span>
+<span id="878">878</span>
+<span id="879">879</span>
+<span id="880">880</span>
+<span id="881">881</span>
+<span id="882">882</span>
+<span id="883">883</span>
+<span id="884">884</span>
+<span id="885">885</span>
+<span id="886">886</span>
+<span id="887">887</span>
+<span id="888">888</span>
+<span id="889">889</span>
+<span id="890">890</span>
+<span id="891">891</span>
+<span id="892">892</span>
+<span id="893">893</span>
+<span id="894">894</span>
+<span id="895">895</span>
+<span id="896">896</span>
 </pre><pre class="rust"><code><span class="comment">/*
  * Copyright (c) 2022 xvanc &lt;xvancm@gmail.com&gt;
  *
@@ -1262,7 +1321,11 @@
 ///
 /// # Safety
 </span><span class="kw">pub unsafe trait </span>Source: Send + Sync {
-    <span class="doccomment">/// # Errors
+    <span class="doccomment">/// Import a span from this source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err`] if no resources are currently available.
     </span><span class="kw">fn </span>import(<span class="kw-2">&amp;</span><span class="self">self</span>, size: usize) -&gt; <span class="prelude-ty">Result</span>&lt;usize&gt;;
 
     <span class="doccomment">/// Release a segment back to its source
@@ -1320,6 +1383,7 @@
                     lists: [SegmentQueue::EMPTY; NUM_FREE_LISTS],
                 },
                 segment_list: SegmentList::new(),
+                last_alloc: ptr::null_mut(),
             }),
         }
     }
@@ -1352,10 +1416,6 @@
     ) -&gt; <span class="prelude-ty">Result</span>&lt;usize&gt; {
         layout.quantum_align(<span class="self">self</span>.quantum);
 
-        <span class="kw">if </span>strategy == AllocStrategy::NextFit {
-            <span class="macro">todo!</span>(<span class="string">&quot;next fit allocation strategy&quot;</span>);
-        }
-
         <span class="kw">let </span><span class="kw-2">mut </span>l = <span class="self">self</span>.l.lock();
 
         <span class="comment">// Select a segment from which to allocate.
@@ -1364,7 +1424,7 @@
             <span class="kw">let </span>opt = <span class="kw">match </span>strategy {
                 AllocStrategy::BestFit =&gt; l.choose_best_fit(<span class="kw-2">&amp;</span>layout),
                 AllocStrategy::InstantFit =&gt; l.choose_instant_fit(<span class="kw-2">&amp;</span>layout),
-                AllocStrategy::NextFit =&gt; <span class="macro">todo!</span>(),
+                AllocStrategy::NextFit =&gt; l.choose_next_fit(<span class="kw-2">&amp;</span>layout),
             };
 
             <span class="kw">if let </span><span class="prelude-val">Some</span>(bt) = opt {
@@ -1406,6 +1466,7 @@
 
             <span class="comment">// Insert the segment into the allocation table.
             </span>l.allocation_table.insert(bt);
+            l.last_alloc = bt;
 
             <span class="prelude-val">Ok</span>((<span class="kw-2">*</span>bt).base)
         }
@@ -1509,7 +1570,16 @@
                     </span><span class="kw">if </span>(<span class="kw-2">*</span>prev).kind == BtKind::SpanImported {
                         <span class="comment">// Remove the span marker and the now free segment from the
                         // arena&#39;s segment list.
-                        </span>l.segment_list.remove(prev);
+
+                        </span><span class="kw">if </span>l.last_alloc == bt {
+                            <span class="kw">if </span>(<span class="kw-2">*</span>bt).segment_list_link.next.is_null() {
+                                l.last_alloc = l.segment_list.head;
+                            } <span class="kw">else </span>{
+                                l.last_alloc = (<span class="kw-2">*</span>bt).segment_list_link.next;
+                            }
+                        }
+
+                        l.segment_list.remove(prev);
                         l.segment_list.remove(bt);
 
                         release_span = prev;
@@ -1521,6 +1591,14 @@
 
                 (<span class="kw-2">*</span>bt).kind = BtKind::Free;
                 l.freelist.insert(bt);
+            }
+        }
+
+        <span class="kw">if </span>l.last_alloc == bt {
+            <span class="kw">if </span>(<span class="kw-2">*</span>bt).segment_list_link.next.is_null() {
+                l.last_alloc = l.segment_list.head;
+            } <span class="kw">else </span>{
+                l.last_alloc = (<span class="kw-2">*</span>bt).segment_list_link.next;
             }
         }
 
@@ -1550,6 +1628,7 @@
     segment_list: SegmentList,
     allocation_table: AllocationTable,
     freelist: FreeLists,
+    last_alloc: <span class="kw-2">*mut </span>Bt,
 }
 
 <span class="kw">impl </span>VmemInner {
@@ -1580,6 +1659,42 @@
         }
         <span class="prelude-val">None
     </span>}
+
+    <span class="kw">fn </span>choose_next_fit(<span class="kw-2">&amp;mut </span><span class="self">self</span>, layout: <span class="kw-2">&amp;</span>Layout) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="kw-2">*mut </span>Bt, usize)&gt; {
+        <span class="comment">// Start searching from the most recent allocation.
+        </span><span class="kw">let </span>start = <span class="kw">if </span><span class="self">self</span>.last_alloc.is_null() {
+            <span class="self">self</span>.segment_list.head
+        } <span class="kw">else </span>{
+            <span class="self">self</span>.last_alloc
+        };
+        <span class="kw">let </span><span class="kw-2">mut </span>bt = start;
+
+        <span class="kw">if </span>bt.is_null() {
+            <span class="comment">// Arena is empty.
+            </span><span class="kw">return </span><span class="prelude-val">None</span>;
+        }
+
+        <span class="kw">loop </span>{
+            <span class="kw">unsafe </span>{
+                <span class="kw">if </span>(<span class="kw-2">*</span>bt).kind == BtKind::Free {
+                    <span class="kw">if let </span><span class="prelude-val">Some</span>(offset) = (<span class="kw-2">*</span>bt).can_satisfy(layout) {
+                        <span class="kw">break </span><span class="prelude-val">Some</span>((bt, offset));
+                    }
+                }
+
+                <span class="kw">if </span>(<span class="kw-2">*</span>bt).segment_list_link.next.is_null() {
+                    <span class="comment">// Reached the end, wrap back around.
+                    </span>bt = <span class="self">self</span>.segment_list.head;
+                } <span class="kw">else </span>{
+                    bt = (<span class="kw-2">*</span>bt).segment_list_link.next;
+                }
+                <span class="kw">if </span>bt == start {
+                    <span class="comment">// We&#39;ve searched the entire arena.
+                    </span><span class="kw">break </span><span class="prelude-val">None</span>;
+                }
+            }
+        }
+    }
 
     <span class="kw">fn </span>print_segment_list(<span class="kw-2">&amp;</span><span class="self">self</span>) {
         <span class="kw">let </span><span class="kw-2">mut </span>bt = <span class="self">self</span>.segment_list.head;
@@ -1646,7 +1761,10 @@
             Bt::free(old);
         }
 
-        <span class="kw">if </span>!next.is_null()
+        <span class="comment">// We want to prevent merging the next block into this one if `last_alloc` still
+        // points this tag. Otherwise we&#39;d start recycling allocations too quickly.
+        </span><span class="kw">if </span>!next.is_null()
+            &amp;&amp; <span class="self">self</span>.last_alloc != bt
             &amp;&amp; (<span class="kw-2">*</span>next).kind == BtKind::Free
             &amp;&amp; (<span class="kw-2">*</span>bt).base + (<span class="kw-2">*</span>bt).size == (<span class="kw-2">*</span>next).base
         {
