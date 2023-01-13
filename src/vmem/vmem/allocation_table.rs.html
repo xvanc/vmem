@@ -71,19 +71,41 @@
 <span id="71">71</span>
 <span id="72">72</span>
 <span id="73">73</span>
+<span id="74">74</span>
+<span id="75">75</span>
+<span id="76">76</span>
+<span id="77">77</span>
+<span id="78">78</span>
+<span id="79">79</span>
+<span id="80">80</span>
+<span id="81">81</span>
+<span id="82">82</span>
+<span id="83">83</span>
+<span id="84">84</span>
+<span id="85">85</span>
 </pre><pre class="rust"><code><span class="kw">use super</span>::{segment_list::SegmentQueue, Bt, BtKind, NUM_HASH_BUCKETS};
 
 <span class="attribute">#[derive(Debug)]
 </span><span class="kw">pub struct </span>AllocationTable {
+    len: usize,
     <span class="kw">pub</span>(<span class="kw">super</span>) buckets: [SegmentQueue; NUM_HASH_BUCKETS],
 }
 
 <span class="kw">impl </span>AllocationTable {
     <span class="kw">pub const fn </span>new() -&gt; AllocationTable {
         <span class="self">Self </span>{
+            len: <span class="number">0</span>,
             buckets: [SegmentQueue::EMPTY; NUM_HASH_BUCKETS],
         }
     }
+
+    <span class="kw">pub const fn </span>len(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+        <span class="self">self</span>.len
+    }
+
+    <span class="kw">pub const fn </span>is_empty(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+        <span class="self">self</span>.len() == <span class="number">0
+    </span>}
 
     <span class="doccomment">/// Returns a reference to the bucket for the specified `base`.
     </span><span class="kw">fn </span>bucket_for_base(<span class="kw-2">&amp;</span><span class="self">self</span>, base: usize) -&gt; <span class="kw-2">&amp;</span>SegmentQueue {
@@ -100,11 +122,13 @@
     <span class="doccomment">/// Insert a boundary tag into the allocation hash table
     </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">unsafe fn </span>insert(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bt: <span class="kw-2">*mut </span>Bt) {
         <span class="self">self</span>.bucket_for_base_mut((<span class="kw-2">*</span>bt).base).insert_head(bt);
+        <span class="self">self</span>.len += <span class="number">1</span>;
     }
 
     <span class="doccomment">/// Remove a boundary tag from the allocation hash table
     </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">unsafe fn </span>remove(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bt: <span class="kw-2">*mut </span>Bt) {
         <span class="self">self</span>.bucket_for_base_mut((<span class="kw-2">*</span>bt).base).remove(bt);
+        <span class="self">self</span>.len -= <span class="number">1</span>;
     }
 
     <span class="doccomment">/// Find a boundary tag in the hash table.
