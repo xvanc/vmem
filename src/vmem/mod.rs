@@ -884,6 +884,21 @@ impl VmemInner {
     }
 }
 
+impl Drop for Vmem<'_, '_> {
+    fn drop(&mut self) {
+        let l = self.l.lock();
+        assert!(l.allocation_table.is_empty());
+        let mut bt = l.segment_list.head;
+        while !bt.is_null() {
+            let ptr = bt;
+            unsafe {
+                bt = (*bt).segment_list_link.next;
+                Bt::free(ptr);
+            }
+        }
+    }
+}
+
 struct HexResult<'a>(&'a Result<usize>);
 
 impl core::fmt::Debug for HexResult<'_> {

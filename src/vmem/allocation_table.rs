@@ -2,14 +2,24 @@ use super::{segment_list::SegmentQueue, Bt, BtKind, NUM_HASH_BUCKETS};
 
 #[derive(Debug)]
 pub struct AllocationTable {
+    len: usize,
     pub(super) buckets: [SegmentQueue; NUM_HASH_BUCKETS],
 }
 
 impl AllocationTable {
     pub const fn new() -> AllocationTable {
         Self {
+            len: 0,
             buckets: [SegmentQueue::EMPTY; NUM_HASH_BUCKETS],
         }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Returns a reference to the bucket for the specified `base`.
@@ -27,11 +37,13 @@ impl AllocationTable {
     /// Insert a boundary tag into the allocation hash table
     pub(super) unsafe fn insert(&mut self, bt: *mut Bt) {
         self.bucket_for_base_mut((*bt).base).insert_head(bt);
+        self.len += 1;
     }
 
     /// Remove a boundary tag from the allocation hash table
     pub(super) unsafe fn remove(&mut self, bt: *mut Bt) {
         self.bucket_for_base_mut((*bt).base).remove(bt);
+        self.len -= 1;
     }
 
     /// Find a boundary tag in the hash table.
