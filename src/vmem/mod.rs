@@ -419,6 +419,36 @@ impl Layout {
         self
     }
 
+    #[inline]
+    pub const fn get_size(&self) -> usize {
+        self.size
+    }
+
+    #[inline]
+    pub const fn get_align(&self) -> usize {
+        self.align
+    }
+
+    #[inline]
+    pub const fn get_phase(&self) -> usize {
+        self.phase
+    }
+
+    #[inline]
+    pub const fn get_nocross(&self) -> usize {
+        self.nocross
+    }
+
+    #[inline]
+    pub const fn get_minaddr(&self) -> usize {
+        self.minaddr
+    }
+
+    #[inline]
+    pub const fn get_maxaddr(&self) -> usize {
+        self.maxaddr
+    }
+
     /// Round the size and alignment of this layout to `quantum`.
     fn quantum_align(&mut self, quantum: usize) {
         debug_assert!(
