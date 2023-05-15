@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":[["AllocStrategy","Allocation Strategy"]],"fn":[["bootstrap","Bootstrap the vmem system"]],"mod":[["vmem","Vmem Resource Allocator"]],"struct":[["Error",""],["Layout","Layout of a constrained allocation"],["Vmem","Vmem Arena"]],"trait":[["Source","Types from which a [`Vmem`] arena can import spans."]],"type":[["Result",""]]};
+window.SIDEBAR_ITEMS = {"enum":["AllocStrategy","Error"],"fn":["bootstrap"],"mod":["vmem"],"struct":["Layout","Vmem"],"trait":["Source"],"type":["Result"]};
