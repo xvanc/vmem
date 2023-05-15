@@ -533,6 +533,8 @@ struct VmemInner {
     allocation_table: AllocationTable,
     freelist: FreeLists,
     last_alloc: *mut Bt,
+    bytes_total: usize,
+    bytes_allocated: usize,
 }
 
 impl<'name, 'src> Vmem<'name, 'src> {
@@ -605,6 +607,8 @@ impl<'name, 'src> Vmem<'name, 'src> {
             },
             segment_list: SegmentList::new(),
             last_alloc: ptr::null_mut(),
+            bytes_total: 0,
+            bytes_allocated: 0,
         };
         Self {
             name,
@@ -686,13 +690,35 @@ impl Vmem<'_, '_> {
             l.allocation_table.insert(bt);
             l.last_alloc = bt;
 
+            l.bytes_allocated += layout.size;
+
             Ok((*bt).base)
         }
     }
 
     /// Returns the name of this arena.
+    #[inline]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the total number of bytes managed by the arena
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.l.lock().bytes_total
+    }
+
+    /// Returns the total number of bytes currently allocated from the arena
+    #[inline]
+    pub fn capacity_used(&self) -> usize {
+        self.l.lock().bytes_allocated
+    }
+
+    /// Returns the total number of bytes in the arena available for allocation
+    #[inline]
+    pub fn capacity_free(&self) -> usize {
+        let l = self.l.lock();
+        l.bytes_total - l.bytes_allocated
     }
 
     /// Add a span to this arena
@@ -791,11 +817,13 @@ impl Vmem<'_, '_> {
 
         'b: {
             unsafe {
+                let alloc_size = cmp::max(self.quantum, size);
+
                 // The sizes should match up, otherwise this is very likely
                 // a double-free. Since a tag was found for the address this
                 // also likely means memory corruption has occurred.
                 assert!(
-                    (*bt).size == cmp::max(self.quantum, size),
+                    (*bt).size == alloc_size,
                     "freed size does not match allocation"
                 );
 
@@ -830,6 +858,7 @@ impl Vmem<'_, '_> {
 
                 (*bt).kind = BtKind::Free;
                 l.freelist.insert(bt);
+                l.bytes_allocated -= alloc_size;
             }
         }
 
@@ -965,6 +994,7 @@ impl VmemInner {
             self.segment_list.insert_ordered_span(span, free);
             self.freelist.insert(free);
         }
+        self.bytes_total += size;
 
         Ok(())
     }
