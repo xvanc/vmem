@@ -150,16 +150,6 @@ impl SegmentQueue {
         }
     }
 
-    pub(super) fn pop_head(&mut self) -> Option<*mut Bt> {
-        let bt = self.head;
-        if bt.is_null() {
-            None
-        } else {
-            unsafe { self.remove(bt) };
-            Some(bt)
-        }
-    }
-
     pub(super) unsafe fn remove(&mut self, bt: *mut Bt) {
         let prev = (*bt).segment_queue_link.prev;
         let next = (*bt).segment_queue_link.next;

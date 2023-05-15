@@ -80,16 +80,17 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::must_use_candidate)]
 
-#[cfg(xvt)]
-use crate::mutex::SpinMutex;
+#[cfg(kernel)]
+use crate::{
+    spl::Ipl,
+    sync::{mutex::MutexKind, Mutex},
+};
 use alloc::borrow::Cow;
 use core::{
     cmp, ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
-#[cfg(xvt)]
-type Mutex<T> = SpinMutex<T>;
-#[cfg(not(xvt))]
+#[cfg(not(kernel))]
 use spin::Mutex;
 
 mod allocation_table;
@@ -99,6 +100,8 @@ use self::{
     allocation_table::AllocationTable,
     segment_list::{LinkedListLink, SegmentList, SegmentQueue},
 };
+
+const LOGGING: bool = cfg!(any(vmem_log, feature = "log"));
 
 const NUM_FREE_LISTS: usize = usize::BITS as usize;
 const NUM_HASH_BUCKETS: usize = 16;
@@ -143,7 +146,18 @@ const fn pow2_crosses_boundary(start: usize, end: usize, align: usize) -> bool {
 }
 
 #[derive(Debug)]
-pub struct Error;
+pub enum Error {
+    OutOfMemory,
+    OutOfTags,
+}
+
+#[cfg(notyet)]
+#[cfg(kernel)]
+impl From<Error> for crate::sys::Errno {
+    fn from(err: Error) -> crate::sys::Errno {
+        crate::sys::Errno::OutOfMemory
+    }
+}
 
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -184,12 +198,12 @@ struct Bt {
 /// Boundary Tag Allocation
 impl Bt {
     /// Allocate a new boundary tag
-    fn alloc(base: usize, size: usize, kind: BtKind) -> Option<*mut Bt> {
+    fn alloc(base: usize, size: usize, kind: BtKind) -> Result<*mut Bt> {
         let bt = alloc_static_bt()?;
         unsafe {
             *bt = Bt::new(base, size, kind);
         }
-        Some(bt)
+        Ok(bt)
     }
 
     /// Free a boundary tag
@@ -219,6 +233,11 @@ impl Bt {
     ///
     /// If successful, returns the offset into the segment at which an allocation respecting
     /// the given constraints could be made.
+    ///
+    /// # Panics
+    ///
+    /// The caller must have already checked that the span is large enough to potentially
+    /// satisfy the allocation.
     fn can_satisfy(&self, layout: &Layout) -> Option<usize> {
         // Align up while respecting `phase`.
         const fn pow2_align_up_phase(start: usize, align: usize, phase: usize) -> usize {
@@ -226,7 +245,10 @@ impl Bt {
         }
 
         debug_assert!(matches!(self.kind, BtKind::Free));
-        debug_assert!(self.size >= layout.size);
+        debug_assert!(
+            self.size >= layout.size,
+            "sanity: `can_satisfy` called on insufficiently-sized tag"
+        );
 
         // I don't fully understand why this works, thank you NetBSD <3
 
@@ -263,26 +285,26 @@ static mut STATIC_BOUNDARY_TAG_STORAGE: [Bt; NUM_STATIC_BTS] = {
 
 static STATIC_BOUNDARY_TAGS: AtomicPtr<Bt> = AtomicPtr::new(ptr::null_mut());
 
-fn alloc_static_bt() -> Option<*mut Bt> {
+fn alloc_static_bt() -> Result<*mut Bt> {
     let mut bt;
     loop {
         bt = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
         if bt.is_null() {
-            break None;
+            break Err(Error::OutOfTags);
         }
         let new_head = unsafe { (*bt).segment_queue_link.next };
         if STATIC_BOUNDARY_TAGS
             .compare_exchange_weak(bt, new_head, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
-            break Some(bt);
+            break Ok(bt);
         }
         core::hint::spin_loop();
     }
 }
 
 unsafe fn free_static_bt(bt: *mut Bt) {
-    debug_assert!(!bt.is_null());
+    debug_assert!(!bt.is_null(), "sanity: freeing null tag");
 
     loop {
         let old_head = STATIC_BOUNDARY_TAGS.load(Ordering::Relaxed);
@@ -330,7 +352,7 @@ impl Layout {
     ///
     /// This function will panic if `size` is `0`.
     pub const fn new(size: usize) -> Layout {
-        assert!(size > 0);
+        assert!(size > 0, "`size` must be greater than zero");
         Self {
             size,
             align: 0,
@@ -348,8 +370,11 @@ impl Layout {
     /// `align` must be a nonzero power-of-two.
     #[must_use]
     pub const fn align(mut self, align: usize) -> Layout {
-        assert!(align.is_power_of_two());
-        assert!(self.nocross == 0 || align >= self.nocross);
+        assert!(align.is_power_of_two(), "`align` must be a power-of-two");
+        assert!(
+            self.nocross == 0 || align >= self.nocross,
+            "`align` must be greater-than or equal-to `nocross`"
+        );
         self.align = align;
         self
     }
@@ -370,8 +395,10 @@ impl Layout {
     /// `nocross` must be a power-of-two
     #[must_use]
     pub const fn nocross(mut self, nocross: usize) -> Layout {
-        // assert!(nocross == 0 || nocross >= self.size);
-        assert!(nocross >= self.size);
+        assert!(
+            nocross >= self.size,
+            "`nocross` must be greater-than or equal-to `size`"
+        );
         self.nocross = nocross;
         self
     }
@@ -383,7 +410,10 @@ impl Layout {
     /// The end of `range` must be greater than the beginning.
     #[must_use]
     pub const fn within(mut self, range: core::ops::RangeInclusive<usize>) -> Layout {
-        assert!(*range.start() <= *range.end());
+        assert!(
+            *range.start() <= *range.end(),
+            "`minaddr` must be less-than or equal-to `maxaddr`"
+        );
         self.minaddr = *range.start();
         self.maxaddr = *range.end();
         self
@@ -391,7 +421,10 @@ impl Layout {
 
     /// Round the size and alignment of this layout to `quantum`.
     fn quantum_align(&mut self, quantum: usize) {
-        debug_assert!(quantum.is_power_of_two());
+        debug_assert!(
+            quantum.is_power_of_two(),
+            "sanity: quantum is not a power-of-two"
+        );
         self.size = cmp::max(quantum, self.size);
         self.align = cmp::max(quantum, self.align);
     }
@@ -464,6 +497,14 @@ pub struct Vmem<'name, 'src> {
 unsafe impl Send for Vmem<'_, '_> {}
 unsafe impl Sync for Vmem<'_, '_> {}
 
+/// The inner, locked portion of a [`Vmem`] arena
+struct VmemInner {
+    segment_list: SegmentList,
+    allocation_table: AllocationTable,
+    freelist: FreeLists,
+    last_alloc: *mut Bt,
+}
+
 impl<'name, 'src> Vmem<'name, 'src> {
     /// Create a new arena
     ///
@@ -475,44 +516,80 @@ impl<'name, 'src> Vmem<'name, 'src> {
         name: Cow<'name, str>,
         quantum: usize,
         source: Option<&'src dyn Source>,
+        #[cfg(kernel)] ipl: Ipl,
     ) -> Self {
-        assert!(quantum.is_power_of_two());
+        Self::new_inner(
+            name,
+            quantum,
+            source,
+            #[cfg(kernel)]
+            ipl,
+        )
+    }
+
+    /// Create a new arena with an initial span
+    ///
+    /// # Errors
+    ///
+    /// This function errors only if resources cannot be allocated to describe the new span.
+    ///
+    /// # Panics
+    ///
+    /// `quantum` must be a power-of-two.
+    pub fn with_span(
+        name: Cow<'name, str>,
+        quantum: usize,
+        source: Option<&'src dyn Source>,
+        base: usize,
+        size: usize,
+        #[cfg(kernel)] ipl: Ipl,
+    ) -> Result<Self> {
+        let vmem = Self::new_inner(
+            name,
+            quantum,
+            source,
+            #[cfg(kernel)]
+            ipl,
+        );
+        vmem.add(base, size)?;
+        Ok(vmem)
+    }
+}
+
+impl<'name, 'src> Vmem<'name, 'src> {
+    #[allow(clippy::must_use_candidate)]
+    const fn new_inner(
+        name: Cow<'name, str>,
+        quantum: usize,
+        source: Option<&'src dyn Source>,
+        #[cfg(kernel)] ipl: Ipl,
+    ) -> Self {
+        assert!(
+            quantum.is_power_of_two(),
+            "`quantum` must be a power-of-two"
+        );
+        let inner = VmemInner {
+            allocation_table: AllocationTable::new(),
+            freelist: FreeLists {
+                lists: [SegmentQueue::EMPTY; NUM_FREE_LISTS],
+            },
+            segment_list: SegmentList::new(),
+            last_alloc: ptr::null_mut(),
+        };
         Self {
             name,
             quantum,
             source,
-            l: Mutex::new(VmemInner {
-                allocation_table: AllocationTable::new(),
-                freelist: FreeLists {
-                    lists: [SegmentQueue::EMPTY; NUM_FREE_LISTS],
-                },
-                segment_list: SegmentList::new(),
-                last_alloc: ptr::null_mut(),
-            }),
+            #[cfg(kernel)]
+            l: Mutex::new(MutexKind::Default, ipl, inner),
+            #[cfg(not(kernel))]
+            l: Mutex::new(inner),
         }
     }
 }
 
 impl Vmem<'_, '_> {
-    fn add_inner(
-        &self,
-        l: &mut VmemInner,
-        base: usize,
-        size: usize,
-        span_kind: BtKind,
-    ) -> Result<()> {
-        log::trace!("{}: add({base:#x}, {size:#x}, {span_kind:?})", self.name);
-
-        let span = Bt::alloc(base, size, span_kind).ok_or(Error)?;
-        let free = Bt::alloc(base, size, BtKind::Free).ok_or(Error)?;
-        unsafe {
-            l.segment_list.insert_ordered_span(span, free);
-            l.freelist.insert(free);
-        }
-
-        Ok(())
-    }
-
+    #[track_caller]
     fn alloc_constrained_inner(
         &self,
         mut layout: Layout,
@@ -543,19 +620,26 @@ impl Vmem<'_, '_> {
 
             // If we have a source, import from it.
             if let Some(source) = self.source {
-                let size = 0x1000 * 64; // ?????
+                let size = (0x1000 * 64).max(layout.size); // ?????
                 if let Ok(base) = source.import(size) {
-                    self.add_inner(&mut l, base, size, BtKind::SpanImported)?;
+                    l.add(
+                        base,
+                        size,
+                        BtKind::SpanImported,
+                        #[cfg(not(kernel))]
+                        self.name(),
+                    )?;
                     continue;
                 }
             }
 
             // TODO: This is where we'd wait for more memory.
 
-            return Err(Error);
+            return Err(Error::OutOfMemory);
         };
 
-        debug_assert!(!bt.is_null());
+        // Ensure spooky events have not occurred.
+        debug_assert!(!bt.is_null(), "sanity: allocated null tag");
 
         unsafe {
             // Remove the segment from the free list.
@@ -575,9 +659,7 @@ impl Vmem<'_, '_> {
             Ok((*bt).base)
         }
     }
-}
 
-impl Vmem<'_, '_> {
     /// Returns the name of this arena.
     pub fn name(&self) -> &str {
         &self.name
@@ -589,7 +671,13 @@ impl Vmem<'_, '_> {
     ///
     /// This function errors only if resources cannot be allocated to describe the new span.
     pub fn add(&self, base: usize, size: usize) -> Result<()> {
-        self.add_inner(&mut self.l.lock(), base, size, BtKind::Span)?;
+        self.l.lock().add(
+            base,
+            size,
+            BtKind::Span,
+            #[cfg(not(kernel))]
+            self.name(),
+        )?;
         Ok(())
     }
 
@@ -620,22 +708,29 @@ impl Vmem<'_, '_> {
     /// # Errors
     ///
     /// This function errors if the requested allocation cannot be satisfied by this arena.
-    #[allow(clippy::too_many_arguments)]
+    #[track_caller]
     pub fn alloc_constrained(&self, layout: Layout, strategy: AllocStrategy) -> Result<usize> {
-        let x = self.alloc_constrained_inner(layout, strategy);
-        log::trace!(
-            "{}: alloc_constrained({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}) => {:?}",
-            self.name,
-            layout.size,
-            layout.align,
-            layout.phase,
-            layout.nocross,
-            layout.minaddr,
-            layout.maxaddr,
-            strategy,
-            HexResult(&x)
-        );
-        x
+        #[cfg(not(kernel))]
+        {
+            let x = self.alloc_constrained_inner(layout, strategy);
+            if LOGGING {
+                log::trace!(
+                    "{}: alloc_constrained({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}) => {:?}",
+                    self.name,
+                    layout.size,
+                    layout.align,
+                    layout.phase,
+                    layout.nocross,
+                    layout.minaddr,
+                    layout.maxaddr,
+                    strategy,
+                    HexResult(&x)
+                );
+            }
+            x
+        }
+        #[cfg(kernel)]
+        self.alloc_constrained_inner(layout, strategy)
     }
 
     /// Free a segment allocated by [`alloc_constrained()`](Vmem::alloc_constrained)
@@ -646,13 +741,18 @@ impl Vmem<'_, '_> {
     ///
     /// # Panics
     ///
-    /// This function panics if the segment cannot be found in the allocation hash table.
+    /// This function panics if a matching segment cannot be found in the allocation table.
     pub unsafe fn free_constrained(&self, base: usize, size: usize) {
-        log::trace!("{}: free_constrained({:#x}, {:#x})", self.name, base, size);
+        #[cfg(not(kernel))]
+        if LOGGING {
+            log::trace!("{}: free_constrained({:#x}, {:#x})", self.name, base, size);
+        }
 
         let mut l = self.l.lock();
 
-        let mut bt = l
+        // Find the tag for the allocation.
+        // If it doesn't exist this is very likely a double-free.
+        let bt = l
             .allocation_table
             .find(base)
             .expect("freed tag not in allocation table");
@@ -661,10 +761,15 @@ impl Vmem<'_, '_> {
 
         'b: {
             unsafe {
-                assert!((*bt).size == cmp::max(self.quantum, size));
+                // The sizes should match up, otherwise this is very likely
+                // a double-free. Since a tag was found for the address this
+                // also likely means memory corruption has occurred.
+                assert!(
+                    (*bt).size == cmp::max(self.quantum, size),
+                    "freed size does not match allocation"
+                );
 
                 l.allocation_table.remove(bt);
-                // (*bt).kind = BtKind::Free;
 
                 let (prev, next) = l.merge(bt);
 
@@ -712,7 +817,7 @@ impl Vmem<'_, '_> {
         if !release_span.is_null() {
             // We must have a source if we have an imported span.
             self.source
-                .unwrap()
+                .expect("have imported span with no source")
                 .release((*release_span).base, (*release_span).size);
         }
         if !free_bts[0].is_null() {
@@ -723,21 +828,16 @@ impl Vmem<'_, '_> {
 
     #[doc(hidden)]
     pub fn log_segment_list(&self) {
-        self.l.lock().print_segment_list();
+        self.l.lock().print_segment_list(self.name());
     }
-}
-
-/// The inner, locked portion of a [`Vmem`] arena
-struct VmemInner {
-    segment_list: SegmentList,
-    allocation_table: AllocationTable,
-    freelist: FreeLists,
-    last_alloc: *mut Bt,
 }
 
 impl VmemInner {
     fn choose_instant_fit(&mut self, layout: &Layout) -> Option<(*mut Bt, usize)> {
-        let first = freelist_for_size(layout.size) + usize::from(!layout.size.is_power_of_two());
+        // By rounding `layout.size` to the next power-of-two >= itself, we start with
+        // the first free list which is guaranteed to have segments large enough to
+        // satisfy the allocation.
+        let first = freelist_for_size(layout.size.next_power_of_two());
         for list in self.freelist.lists[first..].iter_mut() {
             if !list.head.is_null() {
                 if let Some(offset) = unsafe { (*list.head).can_satisfy(layout) } {
@@ -800,9 +900,10 @@ impl VmemInner {
         }
     }
 
-    fn print_segment_list(&self) {
+    fn print_segment_list(&self, name: &str) {
         let mut bt = self.segment_list.head;
 
+        log::info!("{name}");
         while !bt.is_null() {
             unsafe {
                 log::info!(
@@ -816,8 +917,31 @@ impl VmemInner {
         }
     }
 
+    fn add(
+        &mut self,
+        base: usize,
+        size: usize,
+        span_kind: BtKind,
+        #[cfg(not(kernel))] name: &str,
+    ) -> Result<()> {
+        #[cfg(not(kernel))]
+        if LOGGING {
+            log::trace!("{}: add({base:#x}, {size:#x}, {span_kind:?})", name);
+        }
+
+        let span = Bt::alloc(base, size, span_kind)?;
+        let free = Bt::alloc(base, size, BtKind::Free)?;
+        unsafe {
+            self.segment_list.insert_ordered_span(span, free);
+            self.freelist.insert(free);
+        }
+
+        Ok(())
+    }
+
     unsafe fn split(&mut self, bt: *mut Bt, offset: usize, size: usize) -> Result<()> {
         assert!(!bt.is_null());
+        // `can_satisfy` shouldn't return an insufficiently-sized tag
         assert!((*bt).size >= offset + size);
 
         let bt_base = (*bt).base;
@@ -829,13 +953,13 @@ impl VmemInner {
         (*bt).size = size;
 
         if rem_front > 0 {
-            let free = Bt::alloc(bt_base, rem_front, BtKind::Free).ok_or(Error)?;
+            let free = Bt::alloc(bt_base, rem_front, BtKind::Free)?;
             self.segment_list.insert_ordered(free);
             self.freelist.insert(free);
         }
 
         if rem_back > 0 {
-            let free = Bt::alloc(bt_base + offset + size, rem_back, BtKind::Free).ok_or(Error)?;
+            let free = Bt::alloc(bt_base + offset + size, rem_back, BtKind::Free)?;
             self.segment_list.insert_ordered(free);
             self.freelist.insert(free);
         }
@@ -853,6 +977,7 @@ impl VmemInner {
         let mut prev = (*bt).segment_list_link.prev;
         let mut next = (*bt).segment_list_link.next;
 
+        // Any non-span tag should always be preceded by at least a span tag.
         debug_assert!(!prev.is_null());
 
         if (*prev).kind == BtKind::Free && (*prev).base + (*prev).size == (*bt).base {
@@ -887,7 +1012,10 @@ impl VmemInner {
 impl Drop for Vmem<'_, '_> {
     fn drop(&mut self) {
         let l = self.l.lock();
-        assert!(l.allocation_table.is_empty());
+        assert!(
+            l.allocation_table.is_empty(),
+            "dropping arena with live allocations"
+        );
         let mut bt = l.segment_list.head;
         while !bt.is_null() {
             let ptr = bt;
@@ -898,7 +1026,6 @@ impl Drop for Vmem<'_, '_> {
         }
     }
 }
-
 struct HexResult<'a>(&'a Result<usize>);
 
 impl core::fmt::Debug for HexResult<'_> {
