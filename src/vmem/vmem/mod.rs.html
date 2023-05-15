@@ -1066,6 +1066,36 @@
 <a href="#1066" id="1066">1066</a>
 <a href="#1067" id="1067">1067</a>
 <a href="#1068" id="1068">1068</a>
+<a href="#1069" id="1069">1069</a>
+<a href="#1070" id="1070">1070</a>
+<a href="#1071" id="1071">1071</a>
+<a href="#1072" id="1072">1072</a>
+<a href="#1073" id="1073">1073</a>
+<a href="#1074" id="1074">1074</a>
+<a href="#1075" id="1075">1075</a>
+<a href="#1076" id="1076">1076</a>
+<a href="#1077" id="1077">1077</a>
+<a href="#1078" id="1078">1078</a>
+<a href="#1079" id="1079">1079</a>
+<a href="#1080" id="1080">1080</a>
+<a href="#1081" id="1081">1081</a>
+<a href="#1082" id="1082">1082</a>
+<a href="#1083" id="1083">1083</a>
+<a href="#1084" id="1084">1084</a>
+<a href="#1085" id="1085">1085</a>
+<a href="#1086" id="1086">1086</a>
+<a href="#1087" id="1087">1087</a>
+<a href="#1088" id="1088">1088</a>
+<a href="#1089" id="1089">1089</a>
+<a href="#1090" id="1090">1090</a>
+<a href="#1091" id="1091">1091</a>
+<a href="#1092" id="1092">1092</a>
+<a href="#1093" id="1093">1093</a>
+<a href="#1094" id="1094">1094</a>
+<a href="#1095" id="1095">1095</a>
+<a href="#1096" id="1096">1096</a>
+<a href="#1097" id="1097">1097</a>
+<a href="#1098" id="1098">1098</a>
 </pre><pre class="rust"><code><span class="comment">/*
  * Copyright (c) 2022 xvanc &lt;xvancm@gmail.com&gt;
  *
@@ -1601,6 +1631,8 @@
     allocation_table: AllocationTable,
     freelist: FreeLists,
     last_alloc: <span class="kw-2">*mut </span>Bt,
+    bytes_total: usize,
+    bytes_allocated: usize,
 }
 
 <span class="kw">impl</span>&lt;<span class="lifetime">&#39;name</span>, <span class="lifetime">&#39;src</span>&gt; Vmem&lt;<span class="lifetime">&#39;name</span>, <span class="lifetime">&#39;src</span>&gt; {
@@ -1673,6 +1705,8 @@
             },
             segment_list: SegmentList::new(),
             last_alloc: ptr::null_mut(),
+            bytes_total: <span class="number">0</span>,
+            bytes_allocated: <span class="number">0</span>,
         };
         <span class="self">Self </span>{
             name,
@@ -1754,13 +1788,35 @@
             </span>l.allocation_table.insert(bt);
             l.last_alloc = bt;
 
+            l.bytes_allocated += layout.size;
+
             <span class="prelude-val">Ok</span>((<span class="kw-2">*</span>bt).base)
         }
     }
 
     <span class="doccomment">/// Returns the name of this arena.
+    </span><span class="attr">#[inline]
     </span><span class="kw">pub fn </span>name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
         <span class="kw-2">&amp;</span><span class="self">self</span>.name
+    }
+
+    <span class="doccomment">/// Returns the total number of bytes managed by the arena
+    </span><span class="attr">#[inline]
+    </span><span class="kw">pub fn </span>capacity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+        <span class="self">self</span>.l.lock().bytes_total
+    }
+
+    <span class="doccomment">/// Returns the total number of bytes currently allocated from the arena
+    </span><span class="attr">#[inline]
+    </span><span class="kw">pub fn </span>capacity_used(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+        <span class="self">self</span>.l.lock().bytes_allocated
+    }
+
+    <span class="doccomment">/// Returns the total number of bytes in the arena available for allocation
+    </span><span class="attr">#[inline]
+    </span><span class="kw">pub fn </span>capacity_free(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+        <span class="kw">let </span>l = <span class="self">self</span>.l.lock();
+        l.bytes_total - l.bytes_allocated
     }
 
     <span class="doccomment">/// Add a span to this arena
@@ -1859,11 +1915,13 @@
 
         <span class="lifetime">&#39;b</span>: {
             <span class="kw">unsafe </span>{
+                <span class="kw">let </span>alloc_size = cmp::max(<span class="self">self</span>.quantum, size);
+
                 <span class="comment">// The sizes should match up, otherwise this is very likely
                 // a double-free. Since a tag was found for the address this
                 // also likely means memory corruption has occurred.
                 </span><span class="macro">assert!</span>(
-                    (<span class="kw-2">*</span>bt).size == cmp::max(<span class="self">self</span>.quantum, size),
+                    (<span class="kw-2">*</span>bt).size == alloc_size,
                     <span class="string">&quot;freed size does not match allocation&quot;
                 </span>);
 
@@ -1898,6 +1956,7 @@
 
                 (<span class="kw-2">*</span>bt).kind = BtKind::Free;
                 l.freelist.insert(bt);
+                l.bytes_allocated -= alloc_size;
             }
         }
 
@@ -2033,6 +2092,7 @@
             <span class="self">self</span>.segment_list.insert_ordered_span(span, free);
             <span class="self">self</span>.freelist.insert(free);
         }
+        <span class="self">self</span>.bytes_total += size;
 
         <span class="prelude-val">Ok</span>(())
     }
