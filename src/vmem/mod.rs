@@ -895,7 +895,7 @@ impl VmemInner {
         // the first free list which is guaranteed to have segments large enough to
         // satisfy the allocation.
         let first = freelist_for_size(layout.size.next_power_of_two());
-        for list in self.freelist.lists[first..].iter_mut() {
+        for list in &mut self.freelist.lists[first..] {
             if !list.head.is_null() {
                 if let Some(offset) = unsafe { (*list.head).can_satisfy(layout) } {
                     return Some((list.head, offset));
@@ -907,7 +907,7 @@ impl VmemInner {
 
     fn choose_best_fit(&mut self, layout: &Layout) -> Option<(*mut Bt, usize)> {
         let first = freelist_for_size(layout.size);
-        for list in self.freelist.lists[first..].iter_mut() {
+        for list in &mut self.freelist.lists[first..] {
             let mut bt = list.head;
             while !bt.is_null() {
                 unsafe {
