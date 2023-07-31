@@ -1,6 +1,5 @@
 var sourcesIndex = JSON.parse('{\
 "bitflags":["",[],["lib.rs"]],\
-"cfg_if":["",[],["lib.rs"]],\
 "lock_api":["",[],["lib.rs","mutex.rs","remutex.rs","rwlock.rs"]],\
 "log":["",[],["lib.rs","macros.rs"]],\
 "scopeguard":["",[],["lib.rs"]],\
