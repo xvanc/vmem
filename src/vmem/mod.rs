@@ -81,10 +81,7 @@
 #![allow(clippy::must_use_candidate)]
 
 #[cfg(kernel)]
-use crate::{
-    spl::Ipl,
-    sync::{mutex::MutexKind, Mutex},
-};
+use crate::sync::mutex::{Mutex, MutexKind};
 use alloc::borrow::Cow;
 use core::{
     cmp, ptr,
@@ -548,14 +545,14 @@ impl<'name, 'src> Vmem<'name, 'src> {
         name: Cow<'name, str>,
         quantum: usize,
         source: Option<&'src dyn Source>,
-        #[cfg(kernel)] ipl: Ipl,
+        #[cfg(kernel)] mtx_kind: MutexKind,
     ) -> Self {
         Self::new_inner(
             name,
             quantum,
             source,
             #[cfg(kernel)]
-            ipl,
+            mtx_kind,
         )
     }
 
@@ -572,16 +569,16 @@ impl<'name, 'src> Vmem<'name, 'src> {
         name: Cow<'name, str>,
         quantum: usize,
         source: Option<&'src dyn Source>,
+        #[cfg(kernel)] mtx_kind: MutexKind,
         base: usize,
         size: usize,
-        #[cfg(kernel)] ipl: Ipl,
     ) -> Result<Self> {
         let vmem = Self::new_inner(
             name,
             quantum,
             source,
             #[cfg(kernel)]
-            ipl,
+            mtx_kind,
         );
         vmem.add(base, size)?;
         Ok(vmem)
@@ -594,7 +591,7 @@ impl<'name, 'src> Vmem<'name, 'src> {
         name: Cow<'name, str>,
         quantum: usize,
         source: Option<&'src dyn Source>,
-        #[cfg(kernel)] ipl: Ipl,
+        #[cfg(kernel)] mtx_kind: MutexKind,
     ) -> Self {
         assert!(
             quantum.is_power_of_two(),
@@ -614,10 +611,11 @@ impl<'name, 'src> Vmem<'name, 'src> {
             name,
             quantum,
             source,
-            #[cfg(kernel)]
-            l: Mutex::new(MutexKind::Default, ipl, inner),
-            #[cfg(not(kernel))]
-            l: Mutex::new(inner),
+            l: Mutex::new(
+                #[cfg(kernel)]
+                mtx_kind,
+                inner,
+            ),
         }
     }
 }
