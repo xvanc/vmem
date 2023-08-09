@@ -3,10 +3,14 @@ name = "vmem"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["log"]
+log = ["dep:log"]
+
 [dependencies]
 bitflags = "<2"
 spin = "*"
-log = "*"
+log = { version = "*", optional = true }
 
 [dev-dependencies]
 libc = "*"

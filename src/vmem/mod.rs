@@ -98,8 +98,6 @@ use self::{
     segment_list::{LinkedListLink, SegmentList, SegmentQueue},
 };
 
-const LOGGING: bool = cfg!(any(vmem_log, feature = "log"));
-
 const NUM_FREE_LISTS: usize = usize::BITS as usize;
 const NUM_HASH_BUCKETS: usize = 16;
 const NUM_STATIC_BTS: usize = 4096;
@@ -658,7 +656,7 @@ impl Vmem<'_, '_> {
                         base,
                         size,
                         BtKind::SpanImported,
-                        #[cfg(not(kernel))]
+                        #[cfg(all(not(kernel), feature = "log"))]
                         self.name(),
                     )?;
                     continue;
@@ -729,7 +727,7 @@ impl Vmem<'_, '_> {
             base,
             size,
             BtKind::Span,
-            #[cfg(not(kernel))]
+            #[cfg(all(not(kernel), feature = "log"))]
             self.name(),
         )?;
         Ok(())
@@ -764,27 +762,22 @@ impl Vmem<'_, '_> {
     /// This function errors if the requested allocation cannot be satisfied by this arena.
     #[track_caller]
     pub fn alloc_constrained(&self, layout: Layout, strategy: AllocStrategy) -> Result<usize> {
-        #[cfg(not(kernel))]
-        {
-            let x = self.alloc_constrained_inner(layout, strategy);
-            if LOGGING {
-                log::trace!(
-                    "{}: alloc_constrained({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}) => {:?}",
-                    self.name,
-                    layout.size,
-                    layout.align,
-                    layout.phase,
-                    layout.nocross,
-                    layout.minaddr,
-                    layout.maxaddr,
-                    strategy,
-                    HexResult(&x)
-                );
-            }
-            x
-        }
-        #[cfg(kernel)]
-        self.alloc_constrained_inner(layout, strategy)
+        let x = self.alloc_constrained_inner(layout, strategy);
+        #[cfg(feature = "log")]
+        log::trace!(
+            "{}: alloc_constrained({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}) => {:?}",
+            self.name,
+            layout.size,
+            layout.align,
+            layout.phase,
+            layout.nocross,
+            layout.minaddr,
+            layout.maxaddr,
+            strategy,
+            HexResult(&x)
+        );
+        #[allow(clippy::let_and_return)]
+        x
     }
 
     /// Free a segment allocated by [`alloc_constrained()`](Vmem::alloc_constrained)
@@ -797,10 +790,8 @@ impl Vmem<'_, '_> {
     ///
     /// This function panics if a matching segment cannot be found in the allocation table.
     pub unsafe fn free_constrained(&self, base: usize, size: usize) {
-        #[cfg(not(kernel))]
-        if LOGGING {
-            log::trace!("{}: free_constrained({:#x}, {:#x})", self.name, base, size);
-        }
+        #[cfg(all(not(kernel), feature = "log"))]
+        log::trace!("{}: free_constrained({:#x}, {:#x})", self.name, base, size);
 
         let mut l = self.l.lock();
 
@@ -884,6 +875,7 @@ impl Vmem<'_, '_> {
     }
 
     #[doc(hidden)]
+    #[cfg(feature = "log")]
     pub fn log_segment_list(&self) {
         self.l.lock().print_segment_list(self.name());
     }
@@ -957,9 +949,9 @@ impl VmemInner {
         }
     }
 
+    #[cfg(feature = "log")]
     fn print_segment_list(&self, name: &str) {
         let mut bt = self.segment_list.head;
-
         log::info!("{name}");
         while !bt.is_null() {
             unsafe {
@@ -979,12 +971,10 @@ impl VmemInner {
         base: usize,
         size: usize,
         span_kind: BtKind,
-        #[cfg(not(kernel))] name: &str,
+        #[cfg(all(not(kernel), feature = "log"))] name: &str,
     ) -> Result<()> {
-        #[cfg(not(kernel))]
-        if LOGGING {
-            log::trace!("{}: add({base:#x}, {size:#x}, {span_kind:?})", name);
-        }
+        #[cfg(all(not(kernel), feature = "log"))]
+        log::trace!("{}: add({base:#x}, {size:#x}, {span_kind:?})", name);
 
         let span = Bt::alloc(base, size, span_kind)?;
         let free = Bt::alloc(base, size, BtKind::Free)?;
